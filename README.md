@@ -31,42 +31,47 @@ The current submit-ready file is [submission.py](submission.py). It is fully
 self-contained and exposes the required `agent(observation, configuration)`
 function.
 
-## Phase 2: ML-Enhanced Agent
+## Phase 2: ML-Enhanced Agent (Value + Policy for Move Ordering)
+
+This phase implements the core idea from MODEL_PLAN Phase 3: combine learned
+models with search. Two models are trained:
+
+- **Policy model**: 7-class classifier that predicts which column the search
+  would choose. Used for move ordering at the root.
+- **Value model**: regression model that predicts the negamax evaluation score.
+  Combined with policy and heuristic for root-level move ordering.
+
+The search leaves still use the fast hand-crafted `window_score` evaluation —
+the ML models run **only at the root** to order moves, so alpha-beta pruning
+reaches deeper tactical lines without slowdown.
 
 ### Step 1: Generate self-play training data
-
-Use the strong search agent to play against itself and collect board positions
-with negamax evaluation scores as training targets:
 
 ```bash
 conda activate kaggle
 python scripts/generate_selfplay_data.py --games 500 --depth 5 --output data/selfplay.npz
 ```
 
-- `--games`: Number of self-play games (more games = more data, ~33 samples/game)
-- `--depth`: Search depth for data generation (higher = stronger but slower labels)
-- `--output`: Output path for the `.npz` data file
+- `--games`: Number of self-play games (more = more data, ~33 samples/game)
+- `--depth`: Search depth for data generation (higher = stronger labels)
+- `--output`: Output `.npz` file containing features, scores, and best moves
 
-### Step 2: Train the value model
-
-Train a 2-layer neural network on the self-play data. The model predicts
-negamax scores from board features and exports a self-contained submission file:
+### Step 2: Train both models
 
 ```bash
-python scripts/train_model.py --data data/selfplay.npz --epochs 2000 --hidden 256
+python scripts/train_model.py --data data/selfplay.npz --epochs 3000 --hidden 128
 ```
 
-- `--data`: Path to the `.npz` data file from Step 1
-- `--epochs`: Training epochs
-- `--hidden`: Hidden layer size (larger = more expressive but slower inference)
-- `--lr`: Learning rate (default 0.001)
-- `--batch-size`: Mini-batch size (default 64)
-- `--model-output`: Saved model weights (default `models/model.json`)
-- `--submission-output`: Generated submission file (default `submission_ml.py`)
+- `--data`: Path to `.npz` from Step 1
+- `--epochs`: Training epochs (policy uses cross-entropy, value uses MSE)
+- `--hidden`: Hidden layer size for both models (default 128)
+- `--lr`: Learning rate with decay (default 0.001)
+- `--model-output`: Saved weights (default `models/models.json`)
+- `--submission-output`: Generated submission (default `submission_ml.py`)
 
-This produces `submission_ml.py` — a fully self-contained agent with the neural
-network weights embedded. It uses the ML model as the leaf evaluation function
-inside the same alpha-beta search.
+Training outputs:
+- Policy accuracy (how often it predicts the same column as search)
+- Value loss (MSE between predicted and actual negamax scores)
 
 ### Step 3: Validate and evaluate
 
@@ -74,6 +79,26 @@ inside the same alpha-beta search.
 # Validate the ML submission
 python scripts/evaluate_agents.py --episodes 2 --validate-submission submission_ml.py
 
-# Evaluate against baseline opponents (use full time budget for submit-like strength)
-python scripts/evaluate_agents.py --episodes 10 --agent search --time-limit 1.65 --opponents random negamax
+# Evaluate against baseline opponents
+python scripts/evaluate_agents.py --episodes 10 --time-limit 1.65 --opponents random negamax
 ```
+
+### How it works
+
+```
+Root position
+  |
+  +-- Policy model: P(col 0..6 | board)
+  +-- Value model:  V(board after each col)
+  +-- Heuristic:    fast window_score evaluation
+  |
+  +-- Combined score = 0.4 * policy + 0.3 * value + 0.3 * heuristic
+  |
+  +-- Order moves by combined score
+  |
+  +-- Alpha-beta search (fast heuristic eval at leaves)
+```
+
+The 0.4 / 0.3 / 0.3 weights are tuned empirically — the policy model provides
+global strategic guidance, the value model estimates long-term position quality,
+and the hand-crafted heuristic captures immediate tactical threats.
