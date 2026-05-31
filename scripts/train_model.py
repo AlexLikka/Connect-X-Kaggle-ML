@@ -50,6 +50,22 @@ def cross_entropy(probs, labels):
     return -log_probs.mean()
 
 
+def cross_entropy_soft(probs, targets):
+    """Mean cross-entropy against soft targets."""
+    return float(-(targets * np.log(probs + 1e-10)).sum(axis=1).mean())
+
+
+def build_soft_policy_targets(move_scores, valid_masks, temperature):
+    """Convert per-move search scores into soft policy targets."""
+    scaled = np.clip(move_scores / temperature, -80.0, 80.0)
+    scaled = np.where(valid_masks > 0, scaled, -1e9)
+    scaled -= scaled.max(axis=1, keepdims=True)
+    exp_scores = np.exp(scaled) * valid_masks
+    denom = exp_scores.sum(axis=1, keepdims=True)
+    fallback = valid_masks / np.clip(valid_masks.sum(axis=1, keepdims=True), 1.0, None)
+    return np.where(denom > 0, exp_scores / np.clip(denom, 1e-10, None), fallback)
+
+
 class PolicyModel:
     """56 -> hidden(ReLU) -> 7 (softmax logits)."""
 
@@ -98,6 +114,27 @@ class PolicyModel:
         self.b2 -= lr * self.db2
 
         return cross_entropy(probs, labels)
+
+    def train_step_soft(self, X, targets, lr, weight_decay=1e-4):
+        """One step of soft-target cross-entropy gradient descent."""
+        batch_size = X.shape[0]
+        probs = self.forward(X)
+
+        d_logits = (probs - targets) / batch_size
+
+        self.dW2 = self.h1.T @ d_logits + weight_decay * self.W2
+        self.db2 = d_logits.sum(axis=0)
+        d_h1 = d_logits @ self.W2.T
+        d_z1 = d_h1 * relu_deriv(self.z1)
+        self.dW1 = self.X.T @ d_z1 + weight_decay * self.W1
+        self.db1 = d_z1.sum(axis=0)
+
+        self.W1 -= lr * self.dW1
+        self.b1 -= lr * self.db1
+        self.W2 -= lr * self.dW2
+        self.b2 -= lr * self.db2
+
+        return cross_entropy_soft(probs, targets)
 
     def to_dict(self):
         return {
@@ -622,6 +659,12 @@ def main():
     parser.add_argument("--submission-output", default="submission_ml.py")
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--policy-temperature",
+        type=float,
+        default=2000.0,
+        help="Softmax temperature for converting root move scores into policy targets",
+    )
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -630,6 +673,15 @@ def main():
     X = data["X"]
     scores = data["scores"]
     moves = data["moves"]
+    move_scores = data["move_scores"] if "move_scores" in data else None
+    valid_masks = data["valid_masks"] if "valid_masks" in data else None
+    policy_targets = None
+    if move_scores is not None and valid_masks is not None:
+        policy_targets = build_soft_policy_targets(
+            move_scores.astype(np.float32),
+            valid_masks.astype(np.float32),
+            args.policy_temperature,
+        )
 
     n_samples = X.shape[0]
     n_val = int(n_samples * args.val_split)
@@ -639,12 +691,28 @@ def main():
 
     X_train, y_train, m_train = X[train_idx], scores[train_idx], moves[train_idx]
     X_val, y_val, m_val = X[val_idx], scores[val_idx], moves[val_idx]
+    if policy_targets is not None:
+        p_train = policy_targets[train_idx]
+        p_val = policy_targets[val_idx]
+    else:
+        p_train = None
+        p_val = None
 
     input_dim = X.shape[1]
     print(f"Data: {n_samples} samples, {n_val} val, {len(train_idx)} train")
     print(f"  X shape: {X.shape}, input_dim={input_dim}")
     print(f"  scores: mean={scores.mean():.1f}, std={scores.std():.1f}")
     print(f"  moves: {np.bincount(moves, minlength=7)}")
+    if policy_targets is not None:
+        target_entropy = float(
+            -(policy_targets * np.log(policy_targets + 1e-10)).sum(axis=1).mean()
+        )
+        print(
+            "  policy targets: using soft root-score distribution "
+            f"(temperature={args.policy_temperature:.1f}, entropy={target_entropy:.3f})"
+        )
+    else:
+        print("  policy targets: using hard best-move labels")
 
     policy_model = PolicyModel(input_dim, args.hidden)
     value_model = ValueModel(input_dim, args.hidden)
@@ -665,19 +733,31 @@ def main():
             X_batch = X_train[batch_idx]
             y_batch = y_train[batch_idx]
             m_batch = m_train[batch_idx]
+            p_batch = p_train[batch_idx] if p_train is not None else None
 
             current_lr = args.lr / (1.0 + 0.005 * epoch)
 
-            p_loss = policy_model.train_step(X_batch, m_batch, current_lr, weight_decay=1e-4)
+            if p_batch is not None:
+                p_loss = policy_model.train_step_soft(
+                    X_batch, p_batch, current_lr, weight_decay=1e-4
+                )
+            else:
+                p_loss = policy_model.train_step(
+                    X_batch, m_batch, current_lr, weight_decay=1e-4
+                )
             v_loss = value_model.train_step(X_batch, y_batch, current_lr, weight_decay=1e-4)
 
             total_p_loss += p_loss
             total_v_loss += v_loss
             n_batches += 1
 
-        if (epoch + 1) % 200 == 0:
+        should_eval = ((epoch + 1) % 200 == 0) or (epoch + 1 == args.epochs)
+        if should_eval:
             p_probs = policy_model.predict(X_val)
-            p_loss_val = cross_entropy(p_probs, m_val)
+            if p_val is not None:
+                p_loss_val = cross_entropy_soft(p_probs, p_val)
+            else:
+                p_loss_val = cross_entropy(p_probs, m_val)
 
             v_pred = value_model.predict(X_val)
             v_loss_val = float(((v_pred.flatten() - np.clip(y_val / 1e6, -1, 1)) ** 2).mean())

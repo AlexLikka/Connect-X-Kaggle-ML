@@ -49,12 +49,18 @@ reaches deeper tactical lines without slowdown.
 
 ```bash
 conda activate kaggle
-python scripts/generate_selfplay_data.py --games 500 --depth 5 --output data/selfplay.npz
+python scripts/generate_selfplay_data.py --games 500 --depth 7 --random-opening-moves 2 --output data/selfplay.npz
 ```
 
-- `--games`: Number of self-play games (more = more data, ~33 samples/game)
+- `--games`: Number of self-play games
 - `--depth`: Search depth for data generation (higher = stronger labels)
+- `--random-opening-moves`: Sample 0..N random opening plies each game for broader coverage
 - `--output`: Output `.npz` file containing features, scores, and best moves
+
+Generated data now also includes:
+- Mirrored board augmentation by default
+- Per-column root scores for all legal moves
+- Legal-move masks for soft policy training
 
 ### Step 2: Train both models
 
