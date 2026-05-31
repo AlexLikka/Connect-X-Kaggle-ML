@@ -297,37 +297,34 @@ def evaluate_board(board, mark, rows, columns, inarow):
     return score
 
 
-def score_move_ml(board, column, mark, rows, columns, inarow):
-    """ML-enhanced move ordering: combines policy + value + hand-crafted eval."""
+def score_move_ml(board, column, mark, rows, columns, inarow, policy_probs=None):
+    """ML-enhanced move ordering: policy on the current node, value on the child."""
     nb, row = drop_piece(board, column, mark, rows, columns)
     if row < 0:
         return -1e18
     if is_winning_move(nb, row, column, mark, rows, columns, inarow):
         return float(WIN_SCORE)
 
-    feats = _extract_features(nb, mark, rows, columns, inarow)
+    if policy_probs is None:
+        policy_probs = policy_predict(_extract_features(board, mark, rows, columns, inarow))
+    policy_score = policy_probs[column]
 
-    # Policy: probability this column is the best move
-    probs = policy_predict(feats)
-    policy_score = probs[column]
+    child_mark = opponent(mark)
+    child_feats = _extract_features(nb, child_mark, rows, columns, inarow)
+    value_score = -value_predict(child_feats)
 
-    # Value: expected score after this move (as opponent)
-    opp = opponent(mark)
-    v = value_predict(feats)
-    value_score = v
-
-    # Fast hand-crafted eval for tactical detail
     heur = evaluate_board(nb, mark, rows, columns, inarow)
     heur_norm = heur / WIN_SCORE
 
-    # Combined: 40% policy + 30% value + 30% heuristic
-    return policy_score * 0.4 + value_score * 0.3 + heur_norm * 0.3
+    # Policy ranks the move; value/heuristic estimate the resulting position.
+    return policy_score * 0.45 + value_score * 0.35 + heur_norm * 0.20
 
 
 def order_moves(board, moves, mark, rows, columns, inarow):
+    policy_probs = policy_predict(_extract_features(board, mark, rows, columns, inarow))
     return sorted(
         moves,
-        key=lambda c: score_move_ml(board, c, mark, rows, columns, inarow),
+        key=lambda c: score_move_ml(board, c, mark, rows, columns, inarow, policy_probs=policy_probs),
         reverse=True,
     )
 
@@ -346,7 +343,9 @@ def negamax(board, mark, depth, alpha, beta, rows, columns, inarow, deadline, ca
     if imm is not None:
         return WIN_SCORE + depth, imm
     if depth == 0:
-        return evaluate_board(board, mark, rows, columns, inarow), None
+        heur = evaluate_board(board, mark, rows, columns, inarow)
+        ml_value = value_predict(_extract_features(board, mark, rows, columns, inarow))
+        return 0.7 * heur + 0.3 * (ml_value * WIN_SCORE), None
     orig_alpha = alpha
     key = (tuple(board), mark, depth)
     cached = cache.get(key)
