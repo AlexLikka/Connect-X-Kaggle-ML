@@ -31,6 +31,18 @@ The current submit-ready file is [submission.py](submission.py). It is fully
 self-contained and exposes the required `agent(observation, configuration)`
 function.
 
+Run a local head-to-head match between two Kaggle-style submission files:
+
+```bash
+python scripts/play_submissions.py submission.py submission_ml.py --games 2 --alternate-first --render
+```
+
+This local runner follows the Kaggle ConnectX interface:
+- each agent must expose `agent(observation, configuration)`
+- the returned action must be a legal column index
+- invalid actions or full-column moves lose immediately
+- `configuration` includes `rows`, `columns`, `inarow`, and `timeout`
+
 ## Phase 2: ML-Enhanced Agent (Value + Policy for Move Ordering)
 
 This phase implements the core idea from MODEL_PLAN Phase 3: combine learned
