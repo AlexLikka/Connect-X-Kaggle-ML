@@ -50,8 +50,22 @@ def run_match(agent_name, opponent_name, episodes):
     opponent = AGENTS[opponent_name]
 
     start = time.time()
-    first_rewards = evaluate("connectx", [subject, opponent], num_episodes=episodes)
-    second_raw = evaluate("connectx", [opponent, subject], num_episodes=episodes)
+    first_rewards = []
+    second_raw = []
+    for episode_index in range(episodes):
+        print(
+            f"running {agent_name} vs {opponent_name} "
+            f"episode {episode_index + 1}/{episodes} (first order)",
+            flush=True,
+        )
+        first_rewards.extend(evaluate("connectx", [subject, opponent], num_episodes=1))
+    for episode_index in range(episodes):
+        print(
+            f"running {agent_name} vs {opponent_name} "
+            f"episode {episode_index + 1}/{episodes} (second order)",
+            flush=True,
+        )
+        second_raw.extend(evaluate("connectx", [opponent, subject], num_episodes=1))
     elapsed = time.time() - start
 
     second_rewards = [[row[1], row[0]] for row in second_raw]
@@ -94,10 +108,12 @@ def main():
     search_module.DEFAULT_TIME_LIMIT = args.time_limit
 
     if args.validate_submission:
+        print(f"validating {args.validate_submission}...", flush=True)
         validate_submission(args.validate_submission, args.time_limit)
         print(f"validated {args.validate_submission}: self-play completed")
 
     for opponent in args.opponents:
+        print(f"starting benchmark vs {opponent}...", flush=True)
         summary, elapsed = run_match(args.agent, opponent, args.episodes)
         print(
             f"{args.agent:>8} vs {opponent:<8} "

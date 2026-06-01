@@ -14,11 +14,15 @@ import os
 import sys
 import time
 
-from kaggle_environments import make
-
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+# ensure local kaggle-environments package is importable
+local_kaggle_env = os.path.join(ROOT_DIR, 'kaggle-environments-0.1.4')
+if local_kaggle_env not in sys.path:
+    sys.path.insert(0, local_kaggle_env)
+
+from kaggle_environments import make
 
 import numpy as np
 
@@ -117,18 +121,25 @@ def play_game_and_extract(rows, columns, inarow, depth, time_limit):
         if not valid:
             break
 
-        score, best_col = search_module.negamax(
-            board,
-            mark,
-            depth,
-            -float("inf"),
-            float("inf"),
-            rows,
-            columns,
-            inarow,
-            time.time() + time_limit,
-            {},
-        )
+        try:
+            score, best_col = search_module.negamax(
+                board,
+                mark,
+                depth,
+                -float("inf"),
+                float("inf"),
+                rows,
+                columns,
+                inarow,
+                time.time() + time_limit,
+                {},
+            )
+        except search_module.SearchTimeout:
+            # fallback: use evaluation score and a legal move (best-ordered if available)
+            score = search_module.evaluate_board(board, mark, rows, columns, inarow)
+            valid = search_module.valid_moves(board, columns)
+            ordered = search_module.order_moves(board, valid, mark, rows, columns, inarow)
+            best_col = ordered[0] if ordered else (valid[0] if valid else 0)
 
         feats = _extract_features(board, mark, rows, columns, inarow)
         trajectory.append((feats, score, best_col if best_col in valid else valid[0]))

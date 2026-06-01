@@ -711,6 +711,21 @@ def main():
     print(f"Best value val loss:  {best_value_loss:.6f}")
 
     os.makedirs(os.path.dirname(args.model_output) or ".", exist_ok=True)
+    # If no improvement was recorded (e.g., few epochs), fall back to final weights
+    if best_policy_w is None:
+        best_policy_w = {
+            "W1": policy_model.W1.tolist(),
+            "b1": policy_model.b1.tolist(),
+            "W2": policy_model.W2.tolist(),
+            "b2": policy_model.b2.tolist(),
+        }
+    if best_value_w is None:
+        best_value_w = {
+            "W1": value_model.W1.tolist(),
+            "b1": value_model.b1.tolist(),
+            "W2": value_model.W2.tolist(),
+            "b2": value_model.b2.tolist(),
+        }
     best_policy_w["hidden_dim"] = args.hidden
     best_value_w["hidden_dim"] = args.hidden
     model_data = {
