@@ -3,12 +3,14 @@
 Policy model: predicts which column the search would choose (7-class classification).
 Value model: predicts negamax evaluation score (regression).
 
-At inference time, both models run at the root to order moves:
-  - Policy gives P(best move | column) for each candidate
-  - Value gives estimated score after playing each column
+At inference time, both models are used only for move ordering:
+  - Policy gives P(best move | board)
+  - Value gives estimated score after a candidate move
   - Combined score = policy_prob * value_weight + normalized_value * weight
 
-This corresponds to Phase 3 of MODEL_PLAN: "ML move ordering + ML leaf evaluation".
+Search leaves intentionally keep the fast hand-crafted evaluator. This follows
+the best observed f90205c-style scheme: ML guides alpha-beta ordering, but does
+not replace the leaf evaluation.
 
 Usage:
     python scripts/train_model.py --data data/selfplay.npz --epochs 3000 --hidden 128
@@ -519,34 +521,35 @@ def evaluate_board(board, mark, rows, columns, inarow):
     return score
 
 
-def score_move_ml(board, column, mark, rows, columns, inarow, policy_probs=None):
-    """ML-enhanced move ordering: policy on the current node, value on the child."""
+def score_move_ml(board, column, mark, rows, columns, inarow):
+    """ML-enhanced move ordering: combines policy + value + hand-crafted eval."""
     nb, row = drop_piece(board, column, mark, rows, columns)
     if row < 0:
         return -1e18
     if is_winning_move(nb, row, column, mark, rows, columns, inarow):
         return float(WIN_SCORE)
 
-    if policy_probs is None:
-        policy_probs = policy_predict(_extract_features(board, mark, rows, columns, inarow))
-    policy_score = policy_probs[column]
+    feats = _extract_features(nb, mark, rows, columns, inarow)
 
-    child_mark = opponent(mark)
-    child_feats = _extract_features(nb, child_mark, rows, columns, inarow)
-    value_score = -value_predict(child_feats)
+    # Policy: probability this column is the best move.
+    probs = policy_predict(feats)
+    policy_score = probs[column]
+
+    # Value: expected score after this move from our perspective.
+    value_score = value_predict(feats)
 
     heur = evaluate_board(nb, mark, rows, columns, inarow)
     heur_norm = heur / WIN_SCORE
 
-    # Policy ranks the move; value/heuristic estimate the resulting position.
-    return policy_score * 0.45 + value_score * 0.35 + heur_norm * 0.20
+    # f90205c-style fusion: ML orders moves, hand-crafted heuristic still
+    # evaluates search leaves.
+    return policy_score * 0.4 + value_score * 0.3 + heur_norm * 0.3
 
 
 def order_moves(board, moves, mark, rows, columns, inarow):
-    policy_probs = policy_predict(_extract_features(board, mark, rows, columns, inarow))
     return sorted(
         moves,
-        key=lambda c: score_move_ml(board, c, mark, rows, columns, inarow, policy_probs=policy_probs),
+        key=lambda c: score_move_ml(board, c, mark, rows, columns, inarow),
         reverse=True,
     )
 
@@ -565,9 +568,7 @@ def negamax(board, mark, depth, alpha, beta, rows, columns, inarow, deadline, ca
     if imm is not None:
         return WIN_SCORE + depth, imm
     if depth == 0:
-        heur = evaluate_board(board, mark, rows, columns, inarow)
-        ml_value = value_predict(_extract_features(board, mark, rows, columns, inarow))
-        return 0.7 * heur + 0.3 * (ml_value * WIN_SCORE), None
+        return evaluate_board(board, mark, rows, columns, inarow), None
     orig_alpha = alpha
     key = (tuple(board), mark, depth)
     cached = cache.get(key)
@@ -665,6 +666,15 @@ def main():
         default=2000.0,
         help="Softmax temperature for converting root move scores into policy targets",
     )
+    parser.add_argument(
+        "--policy-targets",
+        choices=["hard", "soft"],
+        default="hard",
+        help=(
+            "Policy supervision. 'hard' uses moves labels and matches the f90205c "
+            "scheme. 'soft' uses move_scores/valid_masks when present."
+        ),
+    )
     args = parser.parse_args()
 
     np.random.seed(args.seed)
@@ -676,11 +686,16 @@ def main():
     move_scores = data["move_scores"] if "move_scores" in data else None
     valid_masks = data["valid_masks"] if "valid_masks" in data else None
     policy_targets = None
-    if move_scores is not None and valid_masks is not None:
+    if args.policy_targets == "soft" and move_scores is not None and valid_masks is not None:
         policy_targets = build_soft_policy_targets(
             move_scores.astype(np.float32),
             valid_masks.astype(np.float32),
             args.policy_temperature,
+        )
+    elif args.policy_targets == "soft":
+        print(
+            "  warning: --policy-targets soft requested, but data lacks "
+            "move_scores/valid_masks; falling back to hard labels"
         )
 
     n_samples = X.shape[0]
@@ -712,7 +727,10 @@ def main():
             f"(temperature={args.policy_temperature:.1f}, entropy={target_entropy:.3f})"
         )
     else:
-        print("  policy targets: using hard best-move labels")
+        if move_scores is not None and valid_masks is not None:
+            print("  policy targets: using hard best-move labels (rich data detected)")
+        else:
+            print("  policy targets: using hard best-move labels")
 
     policy_model = PolicyModel(input_dim, args.hidden)
     value_model = ValueModel(input_dim, args.hidden)

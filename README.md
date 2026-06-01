@@ -53,9 +53,9 @@ models with search. Two models are trained:
 - **Value model**: regression model that predicts the negamax evaluation score.
   Combined with policy and heuristic for root-level move ordering.
 
-The search leaves still use the fast hand-crafted `window_score` evaluation —
-the ML models run **only at the root** to order moves, so alpha-beta pruning
-reaches deeper tactical lines without slowdown.
+The search leaves still use the fast hand-crafted `window_score` evaluation.
+The ML models are used for move ordering, so alpha-beta sees promising moves
+earlier without letting an uncalibrated value network overwrite tactical search.
 
 ### Step 1: Generate self-play training data
 
@@ -77,7 +77,7 @@ Generated data now also includes:
 ### Step 2: Train both models
 
 ```bash
-python scripts/train_model.py --data data/selfplay.npz --epochs 3000 --hidden 128
+python scripts/train_model.py --data data/selfplay_rich.npz --epochs 3000 --hidden 128
 ```
 
 - `--data`: Path to `.npz` from Step 1
@@ -86,6 +86,8 @@ python scripts/train_model.py --data data/selfplay.npz --epochs 3000 --hidden 12
 - `--lr`: Learning rate with decay (default 0.001)
 - `--model-output`: Saved weights (default `models/models.json`)
 - `--submission-output`: Generated submission (default `submission_ml.py`)
+- `--policy-targets`: `hard` matches the current best f90205c-style scheme;
+  `soft` uses rich `move_scores/valid_masks` if you want to experiment.
 
 Training outputs:
 - Policy accuracy (how often it predicts the same column as search)
@@ -117,6 +119,6 @@ Root position
   +-- Alpha-beta search (fast heuristic eval at leaves)
 ```
 
-The 0.4 / 0.3 / 0.3 weights are tuned empirically — the policy model provides
-global strategic guidance, the value model estimates long-term position quality,
-and the hand-crafted heuristic captures immediate tactical threats.
+The current default deliberately keeps the f90205c-style hard policy labels and
+hand-crafted search leaves. Rich data is supported, but soft targets should be
+treated as an ablation, not the default candidate for Kaggle submission.
