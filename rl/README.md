@@ -152,3 +152,36 @@ python -m rl.export_policy_samples \
 - 如果训练时间有限，优先跑 `supervised_c128_b8.pt` 加一轮 MCTS 自博弈。
 - 每次迭代后都要和 `submission_ml_best.py`、`submission_ml_f902_rich.py` 比赛。
 - 真正有用的最终产物，通常是「强离线模型蒸馏出来的小模型」，而不是直接提交大模型。
+## Update: current recommended iteration
+
+Early pure-AZ fine-tuning drifted away from the strong rich-data teacher and
+performed poorly in arena. The current safer recommendation is:
+
+1. Keep `data/selfplay_rich.npz` as the main anchor teacher.
+2. Use `rl/data/selfplay_az_*.npz` only as a small extra policy signal.
+3. Start with `az_value_weight=0.0`.
+4. Run `rl.checkpoint_diagnostics` before expensive arena evaluation.
+
+Suggested mixed-training run:
+
+```bash
+python -m rl.train_mixed \
+  --rich-data data/selfplay_rich.npz \
+  --az-data rl/data/selfplay_az_c128_b8_s320.npz \
+  --init-checkpoint rl/checkpoints/supervised_c128_b8.pt \
+  --output rl/checkpoints/mixed_c128_b8_iter1.pt \
+  --epochs 10 \
+  --batch-size 1024 \
+  --lr 5e-5 \
+  --rich-value-weight 0.1 \
+  --az-policy-weight 0.1 \
+  --az-value-weight 0.0
+```
+
+Suggested offline diagnostic:
+
+```bash
+python -m rl.checkpoint_diagnostics \
+  --checkpoint rl/checkpoints/mixed_c128_b8_iter1.pt \
+  --simulations 80
+```

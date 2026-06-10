@@ -68,6 +68,14 @@ def build_soft_policy_targets(move_scores, valid_masks, temperature):
     return np.where(denom > 0, exp_scores / np.clip(denom, 1e-10, None), fallback)
 
 
+def normalize_policy_targets(policy_targets):
+    """Normalize externally provided policy targets into valid distributions."""
+    targets = np.clip(policy_targets.astype(np.float32), 0.0, None)
+    denom = targets.sum(axis=1, keepdims=True)
+    fallback = np.full_like(targets, 1.0 / targets.shape[1])
+    return np.where(denom > 0, targets / np.clip(denom, 1e-10, None), fallback)
+
+
 class PolicyModel:
     """56 -> hidden(ReLU) -> 7 (softmax logits)."""
 
@@ -668,11 +676,12 @@ def main():
     )
     parser.add_argument(
         "--policy-targets",
-        choices=["hard", "soft"],
+        choices=["hard", "soft", "distill"],
         default="hard",
         help=(
             "Policy supervision. 'hard' uses moves labels and matches the f90205c "
-            "scheme. 'soft' uses move_scores/valid_masks when present."
+            "scheme. 'soft' uses move_scores/valid_masks when present. "
+            "'distill' uses policy_targets/value_targets when present."
         ),
     )
     args = parser.parse_args()
@@ -681,22 +690,47 @@ def main():
 
     data = np.load(args.data)
     X = data["X"]
-    scores = data["scores"]
-    moves = data["moves"]
+    scores = data["scores"] if "scores" in data else None
+    moves = data["moves"] if "moves" in data else None
     move_scores = data["move_scores"] if "move_scores" in data else None
     valid_masks = data["valid_masks"] if "valid_masks" in data else None
+    distill_policy = data["policy_targets"] if "policy_targets" in data else None
+    distill_value = data["value_targets"] if "value_targets" in data else None
     policy_targets = None
+    target_mode = args.policy_targets
     if args.policy_targets == "soft" and move_scores is not None and valid_masks is not None:
         policy_targets = build_soft_policy_targets(
             move_scores.astype(np.float32),
             valid_masks.astype(np.float32),
             args.policy_temperature,
         )
+        target_mode = "soft"
+    elif args.policy_targets == "distill" and distill_policy is not None:
+        policy_targets = normalize_policy_targets(distill_policy)
+        target_mode = "distill"
+    elif args.policy_targets == "distill":
+        print(
+            "  warning: --policy-targets distill requested, but data lacks "
+            "policy_targets; falling back to hard labels"
+        )
+        target_mode = "hard"
     elif args.policy_targets == "soft":
         print(
             "  warning: --policy-targets soft requested, but data lacks "
             "move_scores/valid_masks; falling back to hard labels"
         )
+        target_mode = "hard"
+
+    if distill_value is not None:
+        scores = np.asarray(distill_value, dtype=np.float32)
+    elif scores is None:
+        raise ValueError("dataset must contain either 'scores' or 'value_targets'")
+
+    if moves is None:
+        if policy_targets is not None:
+            moves = policy_targets.argmax(axis=1).astype(np.int64)
+        else:
+            raise ValueError("dataset must contain either 'moves' or 'policy_targets'")
 
     n_samples = X.shape[0]
     n_val = int(n_samples * args.val_split)
@@ -716,14 +750,14 @@ def main():
     input_dim = X.shape[1]
     print(f"Data: {n_samples} samples, {n_val} val, {len(train_idx)} train")
     print(f"  X shape: {X.shape}, input_dim={input_dim}")
-    print(f"  scores: mean={scores.mean():.1f}, std={scores.std():.1f}")
+    print(f"  scores: mean={scores.mean():.4f}, std={scores.std():.4f}")
     print(f"  moves: {np.bincount(moves, minlength=7)}")
     if policy_targets is not None:
         target_entropy = float(
             -(policy_targets * np.log(policy_targets + 1e-10)).sum(axis=1).mean()
         )
         print(
-            "  policy targets: using soft root-score distribution "
+            f"  policy targets: using {target_mode} distribution "
             f"(temperature={args.policy_temperature:.1f}, entropy={target_entropy:.3f})"
         )
     else:
