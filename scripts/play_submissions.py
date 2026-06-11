@@ -111,10 +111,33 @@ def load_agent(spec, time_limit):
     return load_submission_agent(path, time_limit)
 
 
-def play_single_game(agent_one, agent_two, config, render=False):
+def play_single_game(agent_one, agent_two, config, render=False, rng=None, random_opening_moves=0):
     board = [EMPTY] * (config.rows * config.columns)
     agents = {1: agent_one, 2: agent_two}
     move_history = []
+    rng = rng or random
+
+    opening_budget = rng.randint(0, random_opening_moves) if random_opening_moves > 0 else 0
+    for _ in range(opening_budget):
+        legal = [column for column in range(config.columns) if board[column] == EMPTY]
+        if not legal:
+            break
+        mark = 1 if len(move_history) % 2 == 0 else 2
+        column = rng.choice(legal)
+        row = drop_piece(board, column, mark, config.rows, config.columns)
+        move_history.append(column)
+        if render:
+            print(f"\nRandom opening {len(move_history)}: mark={mark} -> column {column}")
+            print(format_board(board, config.rows, config.columns))
+        if is_winning_move(board, row, column, mark, config.rows, config.columns, config.inarow):
+            return {
+                "winner": mark,
+                "rewards": {mark: 1.0, opponent(mark): 0.0},
+                "statuses": {1: "DONE", 2: "DONE"},
+                "board": board,
+                "moves": move_history,
+                "error": None,
+            }
 
     while True:
         mark = 1 if len(move_history) % 2 == 0 else 2
@@ -189,6 +212,12 @@ def main():
     parser.add_argument("--games", type=int, default=1, help="Number of games to play.")
     parser.add_argument("--alternate-first", action="store_true", help="Alternate who plays first across games.")
     parser.add_argument("--render", action="store_true", help="Print the board after every move.")
+    parser.add_argument(
+        "--random-opening-moves",
+        type=int,
+        default=0,
+        help="Sample 0..N random legal opening plies before agents move.",
+    )
     parser.add_argument("--rows", type=int, default=6)
     parser.add_argument("--columns", type=int, default=7)
     parser.add_argument("--inarow", type=int, default=4)
@@ -196,6 +225,7 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
+    rng = random.Random(args.seed)
     random.seed(args.seed)
     config = SimpleNamespace(
         rows=args.rows,
@@ -224,7 +254,14 @@ def main():
             print(f"{first.name} is mark 1, {second.name} is mark 2")
             print(format_board([EMPTY] * (args.rows * args.columns), args.rows, args.columns))
 
-        result = play_single_game(first, second, config, render=args.render)
+        result = play_single_game(
+            first,
+            second,
+            config,
+            render=args.render,
+            rng=rng,
+            random_opening_moves=args.random_opening_moves,
+        )
         update_summary(summary, agent_one_mark, result)
 
         winner_name = "draw"

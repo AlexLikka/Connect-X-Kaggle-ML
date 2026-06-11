@@ -722,7 +722,10 @@ def main():
         target_mode = "hard"
 
     if distill_value is not None:
-        scores = np.asarray(distill_value, dtype=np.float32)
+        # ValueModel.train_step scales labels by 1e6 to match search scores.
+        # Distilled value targets are already in [-1, 1], so store them on the
+        # same score scale before they enter the existing training path.
+        scores = np.asarray(distill_value, dtype=np.float32) * 1_000_000.0
     elif scores is None:
         raise ValueError("dataset must contain either 'scores' or 'value_targets'")
 
